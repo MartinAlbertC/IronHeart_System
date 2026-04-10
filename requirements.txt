@@ -1,0 +1,24 @@
+# IranHeart System Dependencies
+# Python
+torch>=2.0.0
+numpy>=1.24.0
+sentence-transformers>=2.2.0
+pydantic>=2.0.0
+psycopg2-binary>=2.9.0
+psycopg[binary]>=3.1.0
+pgvector>=0.2.0
+openai-whisper>=1.0.0
+Pillow>=9.0.0
+transformers>=4.30.0
+ultralytics>=8.0.0
+volcenginesdkarkruntime>=1.0.0
+flask>=3.0.0
+flask-cors>=4.0.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+insightface>=0.7.3
+opencv-python>=4.8.0
+onnxruntime>=1.15.0
+
+# Node.js / TypeScript (>=18)
+# E层依赖见 e_layer/package.json

@@ -1,0 +1,1 @@
+{"version":3,"file":"BaseExecutor.d.ts","sourceRoot":"","sources":["../../src/executors/BaseExecutor.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,aAAa,EAAE,iBAAiB,EAAE,MAAM,eAAe,CAAC;AAEjE;;GAEG;AACH,8BAAsB,YAAY;IAChC,QAAQ,CAAC,OAAO,CAAC,MAAM,EAAE,aAAa,GAAG,OAAO,CAAC,iBAAiB,CAAC;CACpE"}

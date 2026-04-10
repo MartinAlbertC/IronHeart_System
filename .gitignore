@@ -1,0 +1,41 @@
+# 模型文件（太大，不提交）
+models/
+*.pt
+*.onnx
+*.safetensors
+*.bin
+
+# 运行时生成
+logs/
+outputs/
+*.db
+*.jsonl
+
+# Node.js
+e_layer/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.conda/
+
+# 环境和密钥
+.env
+*.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+
+# 视频数据文件
+data/*.mp4
+data/*.wav
+data/*.mp3
