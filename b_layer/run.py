@@ -8,6 +8,7 @@ import json
 import uuid
 import sys
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -97,6 +98,7 @@ class BLayerProcessor:
             timeout_sec=180.0,
         )
 
+        self._flush_lock = threading.Lock()
         self.event_count = 0
         self.semantic_count = 0
         self.face_event_count = 0
@@ -124,6 +126,19 @@ class BLayerProcessor:
     def _process_aligned_events(self, events: list):
         """对齐缓冲区 flush 后的回调：对每个事件做身份融合，再送入聚合器"""
         try:
+            # 跨模态 alias 合并：同批事件中 face alias ≠ speech alias → 合并到注册库
+            face_alias = next((e["payload"].get("alias") for e in events
+                               if e.get("event_type") == "face_detection" and e.get("payload", {}).get("alias")), None)
+            speech_alias = next((e["payload"].get("alias") for e in events
+                                 if e.get("event_type") == "speech_segment" and e.get("payload", {}).get("alias")), None)
+            if face_alias and speech_alias and face_alias != speech_alias:
+                logger.info(f"[identity] 合并 alias: {speech_alias} → {face_alias}")
+                self.tracker.merge_aliases(keep=face_alias, absorb=speech_alias)
+                # 把 speech 事件的 alias 统一改为 face_alias
+                for e in events:
+                    if e.get("event_type") == "speech_segment":
+                        e.setdefault("payload", {})["alias"] = face_alias
+
             for a_event in events:
                 self.fusion.fuse_event(a_event)
                 event_type = a_event.get("event_type", "unknown")
@@ -153,6 +168,14 @@ class BLayerProcessor:
         return datetime.now()
 
     def _flush_window(self):
+        if not self._flush_lock.acquire(blocking=False):
+            return  # 已有线程在 flush，跳过
+        try:
+            self._flush_window_locked()
+        finally:
+            self._flush_lock.release()
+
+    def _flush_window_locked(self):
         window_events = self.aggregator.window
         if not window_events:
             return

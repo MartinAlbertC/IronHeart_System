@@ -267,6 +267,7 @@ class EventGenerator:
             'speaker_tag': 'speaker_unknown',
             'speaker_role_hint': 'unknown',
             'turn_index': segment.get('turn_index', 0),
+            'alias': segment.get('alias'),
             'audio_features': {
                 'volume': round(segment.get('volume', 0.0), 4),
                 'speech_rate': round(segment.get('speech_rate', 0.0), 4),

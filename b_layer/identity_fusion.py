@@ -42,8 +42,8 @@ class IdentityFusion:
         将 resolved_alias 和 modality_used 写回事件。
         """
         payload = event.get("payload", {})
-        face_alias = payload.get("alias")          # A层 Re-ID 写入
-        voice_alias = event.get("resolved_alias")  # B层声纹匹配写入（旧字段兼容）
+        face_alias = payload.get("alias") if event.get("event_type") == "face_detection" else None
+        voice_alias = payload.get("alias") if event.get("event_type") == "speech_segment" else None
 
         face_conf = event.get("confidence", {}).get("quality_score", 0.5)
         voice_conf = 0.5  # 声纹匹配暂无置信度字段，默认 0.5

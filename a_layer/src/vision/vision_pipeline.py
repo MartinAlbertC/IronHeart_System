@@ -448,6 +448,80 @@ class VisionPipeline:
                 f"生成事件: {self.event_sink.event_count}"
             )
 
+    def process_window(self, frames: List[np.ndarray], frame_start: int,
+                       fps: float, audio_slice: np.ndarray,
+                       video_start: Optional[datetime] = None) -> Dict:
+        """
+        处理一个帧窗口，返回该窗口的视觉结果。
+
+        Args:
+            frames: 帧列表
+            frame_start: 窗口起始帧号（用于时间戳计算）
+            fps: 视频帧率
+            audio_slice: 对应时间段的音频（16kHz float32）
+
+        Returns:
+            {
+              'track_alias': {track_id: alias},   # 当前窗口内所有 track 的 alias
+              'speaker_track_id': int | None,      # ASD 判断的说话人 track_id
+              'face_events': [FaceDetectionEvent], # 本窗口产生的 face 事件
+            }
+        """
+        if not frames:
+            return {'track_alias': {}, 'speaker_track_id': None, 'face_events': []}
+
+        base_time = video_start or datetime.now()
+        frame_height, frame_width = frames[0].shape[:2]
+        face_events = []
+        track_alias: Dict[int, str] = {}
+
+        for i, frame in enumerate(frames):
+            frame_count = frame_start + i
+            timestamp = base_time + timedelta(seconds=frame_count / fps)
+            tracks = self._detect_and_track(frame, frame_width, frame_height)
+            tracks_with_faces = self._detect_and_embed_faces(
+                frame, tracks, frame_width, frame_height, frame_count
+            )
+            self._collect_asd_frame(frame, tracks_with_faces)
+
+            for track in tracks_with_faces:
+                fi = track.get("face_info")
+                if not fi:
+                    continue
+                track_id = track["track_id"]
+                if not fi.get("from_cache"):
+                    emb_vec = np.array(fi["embedding"]["vector"], dtype=np.float32)
+                    alias = self._reid.resolve(track_id, emb_vec)
+                    fi["alias"] = alias
+                    track_alias[track_id] = alias
+
+                    if self._should_emit_face_event(track_id, fi["embedding"]):
+                        event = self.event_generator.generate_face_detection_event(
+                            face_info=fi, track_id=track_id, timestamp=timestamp,
+                            frame_width=frame_width, frame_height=frame_height,
+                        )
+                        face_events.append(event)
+                        self.last_emitted_embeddings[track_id] = np.array(fi["embedding"]["vector"])
+                else:
+                    # 缓存帧：alias 已在 fi 中，直接记录
+                    if fi.get("alias"):
+                        track_alias[track_id] = fi["alias"]
+
+            prev_ids = set(self.track_manager.active_tracks.keys())
+            self.track_manager.update(tracks_with_faces, timestamp)
+            for lost_id in prev_ids - set(self.track_manager.active_tracks.keys()):
+                self._reid.mark_lost(lost_id)
+
+        # ASD 推理：直接传入窗口切片，frame_count 传窗口长度（偏移从0计算）
+        self._asd_full_audio = audio_slice
+        self._run_asd_inference(fps, len(frames))
+
+        return {
+            'track_alias': track_alias,
+            'speaker_track_id': self._current_speaker,
+            'face_events': face_events,
+        }
+
     def _should_emit_face_event(self, track_id: int, embedding_dict: Dict) -> bool:
         """
         判断是否应该为该 track_id 输出新的 face_detection 事件
