@@ -38,10 +38,10 @@ ENABLE_PERSON_TRACK_EVENT = False  # 是否输出 person_track 事件
 # 人脸检测配置
 FACE_DETECTOR_BACKEND = "mediapipe"  # mediapipe 或 retinaface
 FACE_CONF_THRESHOLD = 0.6
-MIN_FACE_QUALITY = 0.5
+MIN_FACE_QUALITY = 0.3
 # 跳帧 embedding：同一 track_id 每隔 N 帧才重新调用 insightface
 # 期间直接复用上一次的人脸信息
-FACE_REEMBED_INTERVAL = 15
+FACE_REEMBED_INTERVAL = 25
 
 # 人脸编码配置
 FACE_EMBEDDER_MODEL = "arcface_r50"  # arcface_r50 或 arcface_mobilenet
@@ -51,7 +51,7 @@ FACE_EMBEDDING_NORM = "l2"
 
 # 人脸去重配置
 # 余弦相似度阈值：低于此值认为人脸特征发生显著变化（如正脸→侧脸），才输出新事件
-FACE_CHANGE_THRESHOLD = 0.75
+FACE_CHANGE_THRESHOLD = 0.8
 
 # 人脸批处理
 FACE_BATCH_SIZE = 16
@@ -59,7 +59,7 @@ FACE_BATCH_SIZE = 16
 # ============= 中线路配置 =============
 
 # 场景描述配置（两级触发：廉价直方图变化检测 + 按需 Florence-2 推理）
-ENABLE_SCENE_CLASSIFICATION = True
+ENABLE_SCENE_CLASSIFICATION = False
 FLORENCE2_MODEL_DIR = str(MODELS_DIR / "AI-ModelScope/Florence-2-base")
 SCENE_CHANGE_THRESHOLD = 0.75  # 直方图相关性低于此值视为场景疑似变化
 SCENE_CHANGE_COOLDOWN_SEC = 5.0  # 两次 Florence-2 推理之间的最小间隔（秒）
@@ -98,10 +98,10 @@ ENABLE_DB_OUTPUT = False
 # ============= 飞书管道配置 =============
 FEISHU_APP_ID = ""
 FEISHU_APP_SECRET = ""
-FEISHU_BOT_MODE = "websocket"      # websocket 或 webhook
-FEISHU_WEBHOOK_PORT = 8080         # webhook 模式监听端口
-FEISHU_VERIFICATION_TOKEN = ""     # webhook 模式验证 token
-FEISHU_ENCRYPT_KEY = ""            # webhook 模式加密 key
+FEISHU_BOT_MODE = "websocket"  # websocket 或 webhook
+FEISHU_WEBHOOK_PORT = 8080  # webhook 模式监听端口
+FEISHU_VERIFICATION_TOKEN = ""  # webhook 模式验证 token
+FEISHU_ENCRYPT_KEY = ""  # webhook 模式加密 key
 
 # ============= 日志配置 =============
 LOG_LEVEL = "INFO"

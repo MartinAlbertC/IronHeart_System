@@ -23,6 +23,7 @@ __pycache__/
 # 环境和密钥
 .env
 *.env.local
+.venv/
 
 # IDE
 .vscode/

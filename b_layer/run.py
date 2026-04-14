@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -18,6 +19,52 @@ from shared.mq_client import MQClient
 
 logger = setup_logger("b_layer")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 日志格式化工具
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PANEL_WIDTH = 80
+
+
+def _panel(lines: list, title: str = "") -> str:
+    """生成一个居中标题的面板字符串"""
+    out = []
+    if title:
+        out.append(f"╔{'═' * (_PANEL_WIDTH - 2)}╗")
+        pad_l = (_PANEL_WIDTH - 4 - len(title)) // 2
+        pad_r = _PANEL_WIDTH - 4 - len(title) - pad_l
+        out.append(f"║  {' ' * pad_l}{title}{' ' * pad_r}  ║")
+        out.append(f"╠{'═' * (_PANEL_WIDTH - 2)}╣")
+    else:
+        out.append(f"╔{'═' * (_PANEL_WIDTH - 2)}╗")
+
+    for line in lines:
+        if len(line) > _PANEL_WIDTH - 4:
+            line = line[:_PANEL_WIDTH - 7] + "..."
+        pad = _PANEL_WIDTH - 4 - len(line)
+        out.append(f"║  {line}{' ' * pad}  ║")
+    out.append(f"╚{'═' * (_PANEL_WIDTH - 2)}╝")
+    return "\n".join(out)
+
+
+def _format_alias_state(state: dict, alias: str) -> str:
+    fa = state['face_samples']
+    va = state['voice_samples']
+    face_mark = "●" if state['has_face'] else "○"
+    voice_mark = "●" if state['has_voice'] else "○"
+    last_seen = state.get('last_seen')
+    if last_seen is not None:
+        t = datetime.fromtimestamp(last_seen).strftime("%H:%M:%S")
+        time_str = f" | last={t}"
+    else:
+        time_str = ""
+    return f"  {alias:<10} 人脸{face_mark}({fa:2d})  声音{voice_mark}({va:2d}){time_str}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B 层处理器
+# ─────────────────────────────────────────────────────────────────────────────
 
 class BLayerProcessor:
     """B 层处理器：订阅 A 层事件 → 聚合分析 → 发布 B 层语义事件"""
@@ -30,83 +77,104 @@ class BLayerProcessor:
         from b_layer.event_aggregator import EventAggregator
         from b_layer.semantic_generator import SemanticGenerator
         from b_layer.context_manager import ContextManager
+        from b_layer.identity_fusion import IdentityFusion
+        from b_layer.temporal_align import TemporalAlignBuffer
 
         db_path = str(Path(__file__).parent.parent / "outputs" / "person_cache.db")
-        self.tracker = IdentityTracker(db_path, config['identity']['face_similarity_threshold'])
+        identity_cfg = config.get('identity', {})
+        self.tracker = IdentityTracker(
+            db_path,
+            threshold=identity_cfg.get('face_similarity_threshold', 0.60),
+            min_sample_quality=identity_cfg.get('min_sample_quality', 0.40),
+            merge_similarity_threshold=identity_cfg.get('merge_similarity_threshold', 0.70),
+        )
         self.context_mgr = ContextManager()
         self.aggregator = EventAggregator(config)
         self.generator = SemanticGenerator(config)
+        self.fusion = IdentityFusion()
+        self.align_buffer = TemporalAlignBuffer(
+            on_flush=self._process_aligned_events,
+            timeout_sec=180.0,
+        )
 
         self.event_count = 0
         self.semantic_count = 0
+        self.face_event_count = 0
+        self.voice_event_count = 0
+        self._last_entity_panel_time = 0.0
 
         logger.info("B层处理器初始化完成")
 
     def process_a_event(self, a_event: dict):
-        """处理单个 A 层事件（由 MQ subscribe 回调调用）"""
+        """A层事件入口：scene_detection 直接处理，其余进对齐缓冲区"""
         try:
-            # 记录接收到的 A 层事件
-            log_event_inbound(logger, "A", "PerceptionEvent", a_event)
-
             self.event_count += 1
             event_type = a_event.get("event_type", "unknown")
-            logger.info(f"处理A层事件 #{self.event_count}: type={event_type}")
-
-            # 1. 更新上下文
-            self.context_mgr.update(a_event)
-
-            # 2. 身份跟踪：为 face_detection 和 speech_segment 匹配/创建身份
-            if event_type == 'face_detection':
-                face_emb = a_event['payload']['face_embedding']['vector']
-                ts = self._parse_event_time(a_event)
-                alias_id = self.tracker.match_or_create(face_emb, 'face', timestamp=ts)
-                a_event['resolved_alias'] = alias_id
-
-            elif event_type == 'speech_segment':
-                voice_emb = a_event['payload'].get('voice_embedding', {}).get('vector')
-                if voice_emb:
-                    ts = self._parse_event_time(a_event)
-                    alias_id = self.tracker.match_or_create(voice_emb, 'voice', timestamp=ts)
-                    a_event['resolved_alias'] = alias_id
-
-            # 3. 添加到聚合窗口
-            self.aggregator.add_event(a_event)
-
-            # 4. 检查是否触发聚合输出
-            if self.aggregator.should_trigger():
-                self._flush_window()
-
+            if event_type == "scene_detection":
+                ts = a_event.get('time', {}).get('start_ts', '')[:19]
+                logger.info(f"[{ts}] #{self.event_count:3d} scene_detection | {a_event.get('subtype', '')}")
+                self.aggregator.add_event(a_event)
+                if self.aggregator.should_trigger():
+                    self._flush_window()
+            else:
+                self.align_buffer.add(a_event)
         except Exception as e:
             logger.error(f"处理A层事件异常: {e}", exc_info=True)
 
+    def _process_aligned_events(self, events: list):
+        """对齐缓冲区 flush 后的回调：对每个事件做身份融合，再送入聚合器"""
+        try:
+            for a_event in events:
+                self.fusion.fuse_event(a_event)
+                event_type = a_event.get("event_type", "unknown")
+                ts = a_event.get('time', {}).get('start_ts', '')[:19]
+                alias = a_event.get("resolved_alias", "unknown")
+                filled = " [aligned]" if a_event.get("_alias_filled_by_align") else ""
+
+                if event_type == 'face_detection':
+                    self.face_event_count += 1
+                    logger.info(f"[{ts}] face_detection  | alias={alias}{filled}")
+                elif event_type == 'speech_segment':
+                    self.voice_event_count += 1
+                    text = a_event['payload'].get('text', '')[:30]
+                    logger.info(f"[{ts}] speech_segment  | alias={alias}{filled} | {text}")
+
+                self.aggregator.add_event(a_event)
+            if self.aggregator.should_trigger():
+                self._flush_window()
+        except Exception as e:
+            logger.error(f"_process_aligned_events 异常: {e}", exc_info=True)
+
     @staticmethod
     def _parse_event_time(event: dict) -> datetime:
-        """从 A 层事件中解析时间戳"""
         ts_str = event.get('time', {}).get('start_ts', '')
         if ts_str:
             return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
         return datetime.now()
 
     def _flush_window(self):
-        """将当前聚合窗口的事件生成语义事件并发布"""
         window_events = self.aggregator.window
         if not window_events:
             return
 
+        # 上下文 & LLM 语义生成
         context = self.context_mgr.get_context()
-
-        # 调用 LLM 生成语义
+        window_summary = self.aggregator.get_window_summary()
         llm_result = self.generator.generate(window_events, context)
 
-        # Log LLM aggregation result
-        sep = "=" * 70
-        logger.info(f"\n{sep}")
-        logger.info(">>> LLM AGGREGATION RESULT")
-        logger.info(sep)
-        logger.info(json.dumps(llm_result, ensure_ascii=False, indent=2))
-        logger.info(f"{sep}\n")
+        # ── 打印 LLM 聚合结果 ──
+        t_start = window_summary['start_ts'][11:19] if window_summary['start_ts'] else ''
+        t_end = window_summary['end_ts'][11:19] if window_summary['end_ts'] else ''
+        face_aliases = window_summary['face_aliases']
+        voice_aliases = window_summary['voice_aliases']
+        logger.info(f"\n{'─' * _PANEL_WIDTH}")
+        logger.info(f"  [LLM 聚合] {t_start} → {t_end}")
+        logger.info(f"  face_aliases={face_aliases}  voice_aliases={voice_aliases}")
+        logger.info(f"  dialogue_act : {llm_result['dialogue_act']}")
+        logger.info(f"  summary      : {llm_result['summary'][:100]}")
+        logger.info(f"{'─' * _PANEL_WIDTH}\n")
 
-        # 构建语义事件
+        # ── Step 4: 构建语义事件 ──
         first_event = window_events[0]
         last_event = window_events[-1]
 
@@ -140,33 +208,68 @@ class BLayerProcessor:
             }
         }
 
-        # 记录要发送到 C 层的语义事件
-        log_event_outbound(logger, "C", "SemanticEvent", semantic_event)
-
-        # 发布到 MQ
-        self.mq.publish("b_events", semantic_event)
+        # ── Step 5: 打印语义输出摘要 ──
         self.semantic_count += 1
-        logger.info(
-            f"B层输出事件 #{self.semantic_count}: "
-            f"type={semantic_event['semantic_type']} | "
-            f"entity={primary_alias} | "
-            f"dialogue_act={llm_result['dialogue_act']} | "
-            f"summary={llm_result['summary'][:50]}"
-        )
+        out_lines = [
+            f"事件 #{self.semantic_count}",
+            f"时间   : {t_start} → {t_end}",
+            f"实体   : {primary_alias or 'N/A'}",
+            f"对话类型: {llm_result['dialogue_act']}",
+            f"摘要   : {llm_result['summary'][:80]}...",
+        ]
+        logger.info("\n" + _panel(out_lines, "语义事件输出"))
 
-        # 重置聚合窗口
+        self.mq.publish("b_events", semantic_event)
         self.aggregator.reset()
+        self._maybe_log_entity_panel()
+
+    @staticmethod
+    def _to_unix(ts_str: str) -> float:
+        if not ts_str:
+            return 0.0
+        ts_str = ts_str.rstrip('Z')
+        try:
+            dt = datetime.fromisoformat(ts_str)
+        except ValueError:
+            return 0.0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return dt.timestamp()
+
+    def _maybe_log_entity_panel(self):
+        now = time.time()
+        if now - self._last_entity_panel_time < 5.0:
+            return
+        self._last_entity_panel_time = now
+
+        state = self.tracker.get_state_summary()
+        if not state:
+            return
+
+        lines = [f"当前实体数量: {len(state)}"]
+        for alias in sorted(state.keys()):
+            lines.append(_format_alias_state(state[alias], alias))
+        logger.info("\n" + _panel(lines, "实 体 状 态"))
 
     def run(self):
-        """主循环：订阅 a_events 队列"""
         logger.info("B层启动，订阅 a_events 队列...")
         self.mq.subscribe("a_events", self.process_a_event)
 
-        # 保持主线程存活
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
+            state = self.tracker.get_state_summary()
+            final_lines = [
+                f"处理 A 层事件: {self.event_count}",
+                f"  face_events: {self.face_event_count}",
+                f"  voice_events: {self.voice_event_count}",
+                f"生成 B 层语义事件: {self.semantic_count}",
+                f"最终实体数量: {len(state)}",
+            ]
+            for alias in sorted(state.keys()):
+                final_lines.append(_format_alias_state(state[alias], alias))
+            logger.info("\n" + _panel(final_lines, "B层关闭统计"))
             logger.info(f"B层关闭 | 共处理 {self.event_count} 个A层事件, 生成 {self.semantic_count} 个B层事件")
 
 

@@ -50,6 +50,13 @@ class AudioPipeline:
 
         self._turn_index = 0
 
+        # 注册库（声纹身份识别）
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+        from shared.registry import PersonRegistry
+        self._registry = PersonRegistry()
+
     # ------------------------------------------------------------------
     # 模型加载
     # ------------------------------------------------------------------
@@ -136,6 +143,23 @@ class AudioPipeline:
         # 声纹 embedding
         voice_embedding = self.embedder.extract(audio)
 
+        # 声纹身份识别：穿戴者优先，再查注册库
+        emb_vec = np.array(voice_embedding['vector'], dtype=np.float32)
+        if self._registry.match_wearer_voice(emb_vec):
+            alias = self._registry.get_wearer_id() or 'wearer'
+        else:
+            result = self._registry.match_voice(emb_vec)
+            if result:
+                alias = result[0]
+                # 高置信度匹配，自动更新注册库
+                if result[1] >= 0.7:
+                    self._registry.add_voice_embedding(alias, emb_vec, quality=float(result[1]))
+            else:
+                import uuid
+                alias = f"stranger_{uuid.uuid4().hex[:8]}"
+                self._registry.register_person(alias, f"陌生人_{alias[-8:]}", is_wearer=False)
+                self._registry.add_voice_embedding(alias, emb_vec)
+
         # 音量（RMS）
         volume = float(np.sqrt(np.mean(audio ** 2)))
 
@@ -150,10 +174,11 @@ class AudioPipeline:
             "speech_event": asr_result.get("speech_event", "unknown"),
             "start_ts": audio_start_time + timedelta(seconds=seg.start_sec),
             "end_ts": audio_start_time + timedelta(seconds=seg.end_sec),
-            "volume": round(min(1.0, volume * 10), 4),  # 归一化到 0-1
+            "volume": round(min(1.0, volume * 10), 4),
             "speech_rate": round(speech_rate, 2),
             "voice_embedding": voice_embedding,
             "turn_index": self._turn_index,
+            "alias": alias,
         }
 
         return self.event_generator.generate_speech_segment_event(segment_info)

@@ -17,69 +17,69 @@ MODELS = [
     # ── Florence-2 场景描述模型 (~890MB) ──
     (
         "AI-ModelScope/Florence-2-base/model.safetensors",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/model.safetensors",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/model.safetensors",
         "~442MB",
     ),
     (
         "AI-ModelScope/Florence-2-base/pytorch_model.bin",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/pytorch_model.bin",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/pytorch_model.bin",
         "~443MB",
     ),
     (
         "AI-ModelScope/Florence-2-base/config.json",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/config.json",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/config.json",
         "~1KB",
     ),
     (
         "AI-ModelScope/Florence-2-base/configuration_florence2.py",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/configuration_florence2.py",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/configuration_florence2.py",
         "~15KB",
     ),
     (
         "AI-ModelScope/Florence-2-base/modeling_florence2.py",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/modeling_florence2.py",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/modeling_florence2.py",
         "~125KB",
     ),
     (
         "AI-ModelScope/Florence-2-base/processing_florence2.py",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/processing_florence2.py",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/processing_florence2.py",
         "~48KB",
     ),
     (
         "AI-ModelScope/Florence-2-base/preprocessor_config.json",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/preprocessor_config.json",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/preprocessor_config.json",
         "~1KB",
     ),
     (
         "AI-ModelScope/Florence-2-base/tokenizer.json",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/tokenizer.json",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/tokenizer.json",
         "~1.3MB",
     ),
     (
         "AI-ModelScope/Florence-2-base/tokenizer_config.json",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/tokenizer_config.json",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/tokenizer_config.json",
         "~1KB",
     ),
     (
         "AI-ModelScope/Florence-2-base/vocab.json",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/vocab.json",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/vocab.json",
         "~1.1MB",
     ),
     (
         "AI-ModelScope/Florence-2-base/special_tokens_map.json",
-        "https://huggingface.co/microsoft/Florence-2-base/resolve/main/special_tokens_map.json",
+        "https://hf-mirror.com/microsoft/Florence-2-base/resolve/main/special_tokens_map.json",
         "~1KB",
     ),
 
     # ── Wespeaker 声纹编码模型 (~26MB) ──
     (
         "wespeaker/wespeaker-cnceleb-resnet34-LM/cnceleb_resnet34_LM.onnx",
-        "https://huggingface.co/westlake-repl/SaSpeaker/resolve/main/wespeaker-cnceleb-resnet34-LM/cnceleb_resnet34_LM.onnx",
+        "https://hf-mirror.com/westlake-repl/SaSpeaker/resolve/main/wespeaker-cnceleb-resnet34-LM/cnceleb_resnet34_LM.onnx",
         "~26MB",
     ),
     (
         "wespeaker/wespeaker-cnceleb-resnet34-LM/config.yaml",
-        "https://huggingface.co/westlake-repl/SaSpeaker/resolve/main/wespeaker-cnceleb-resnet34-LM/config.yaml",
+        "https://hf-mirror.com/westlake-repl/SaSpeaker/resolve/main/wespeaker-cnceleb-resnet34-LM/config.yaml",
         "~2KB",
     ),
 ]
