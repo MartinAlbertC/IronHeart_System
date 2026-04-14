@@ -99,6 +99,7 @@ class BLayerProcessor:
         )
 
         self._flush_lock = threading.Lock()
+        self._summary_queue: list = []  # 最近 5 条语义摘要
         self.event_count = 0
         self.semantic_count = 0
         self.face_event_count = 0
@@ -183,7 +184,7 @@ class BLayerProcessor:
         # 上下文 & LLM 语义生成
         context = self.context_mgr.get_context()
         window_summary = self.aggregator.get_window_summary()
-        llm_result = self.generator.generate(window_events, context)
+        llm_result = self.generator.generate(window_events, context, list(self._summary_queue))
 
         # ── 打印 LLM 聚合结果 ──
         t_start = window_summary['start_ts'][11:19] if window_summary['start_ts'] else ''
@@ -243,6 +244,12 @@ class BLayerProcessor:
         logger.info("\n" + _panel(out_lines, "语义事件输出"))
 
         self.mq.publish("b_events", semantic_event)
+        # 更新历史摘要队列（最多保留5条）
+        summary_text = llm_result.get('summary', '')
+        if summary_text:
+            self._summary_queue.append(summary_text)
+            if len(self._summary_queue) > 5:
+                self._summary_queue.pop(0)
         self.aggregator.reset()
         self._maybe_log_entity_panel()
 
