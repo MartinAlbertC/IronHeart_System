@@ -74,6 +74,8 @@ class EventGenerator:
 
         payload = {
             'face_id_local': face_info['id'],
+            'track_id': track_id,
+            'alias': face_info.get('alias'),
             'bbox': face_info['bbox_norm'],
             'bbox_format': 'normalized_xywh',
             'yaw_pitch_roll': face_info.get('yaw_pitch_roll', [0.0, 0.0, 0.0]),
@@ -265,6 +267,7 @@ class EventGenerator:
             'speaker_tag': 'speaker_unknown',
             'speaker_role_hint': 'unknown',
             'turn_index': segment.get('turn_index', 0),
+            'alias': segment.get('alias'),
             'audio_features': {
                 'volume': round(segment.get('volume', 0.0), 4),
                 'speech_rate': round(segment.get('speech_rate', 0.0), 4),

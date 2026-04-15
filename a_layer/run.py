@@ -8,7 +8,6 @@ A 层（感知层）MQ 模式入口
 import argparse
 import sys
 import time
-import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -37,56 +36,13 @@ def main():
         if attr.isupper():
             setattr(_core_cfg, attr, getattr(_cfg, attr))
 
-    from src.core.event_generator import EventSink
-    sink = EventSink(
-        output_file=str(Path(__file__).parent.parent / "outputs" / "a_events_backup.jsonl"),
-        append=False,
-    )
+    from src.unified_pipeline import UnifiedPipeline
 
-    from src.vision.vision_pipeline import VisionPipeline
-    from src.audio.audio_pipeline import AudioPipeline
-
-    logger.info("Loading vision pipeline models...")
-    vision = VisionPipeline(event_sink=sink)
-
-    logger.info("Loading audio pipeline models...")
-    audio = AudioPipeline(event_sink=sink)
-
-    # 并行处理
-    shared_start_time = datetime.now()
-    errors = {}
-
-    def run_vision():
-        try:
-            vision.process_video(args.video, max_frames=args.max_frames, start_time=shared_start_time)
-        except Exception as e:
-            errors["vision"] = e
-            logger.error(f"Vision pipeline error: {e}", exc_info=True)
-
-    def run_audio():
-        try:
-            audio.process_video(args.video, start_time=shared_start_time)
-        except Exception as e:
-            errors["audio"] = e
-            logger.error(f"Audio pipeline error: {e}", exc_info=True)
-
+    logger.info("Loading unified pipeline models...")
     t0 = time.time()
-
-    vt = threading.Thread(target=run_vision, daemon=True, name="run_vision")
-    vt.start()
-    at = threading.Thread(target=run_audio, daemon=True, name="run_audio")
-    at.start()
-
-    vt.join()
-    at.join()
+    pipeline = UnifiedPipeline(video_path=args.video)
+    pipeline.process(max_frames=args.max_frames, start_time=datetime.now())
     elapsed = time.time() - t0
-
-    sink.close()
-
-    if errors:
-        for name, err in errors.items():
-            logger.error(f"[{name}] {err}")
-        sys.exit(1)
 
     logger.info(f"A-layer processing complete | elapsed={elapsed:.1f}s")
 

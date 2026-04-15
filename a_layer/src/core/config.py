@@ -22,8 +22,8 @@ VIDEO_FPS = 30
 
 # ============= 快线路配置 =============
 
-# YOLOv8 配置
-YOLO_MODEL = str(PROJECT_ROOT / "yolo26n.pt")
+# YOLOv26 配置
+YOLO_MODEL = str(MODELS_DIR / "yolo26n.pt")
 YOLO_CONF_THRESHOLD = 0.5
 YOLO_IOU_THRESHOLD = 0.45
 

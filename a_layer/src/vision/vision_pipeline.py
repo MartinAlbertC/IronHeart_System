@@ -8,6 +8,7 @@ import time
 
 from ultralytics import YOLO
 from src.vision.face_analyzer import FaceAnalyzer, FaceQualityAssessor
+from src.vision.re_id import ReIDModule
 from src.core.event_generator import EventGenerator, EventSink, TrackInfo
 from src.core.utils import crop_bbox, normalize_bbox, EventIDGenerator
 import src.core.config as config
@@ -191,6 +192,21 @@ class VisionPipeline:
             min_track_age=config_module.MIN_TRACK_AGE
         )
 
+        # 初始化 Re-ID 模块
+        from shared.registry import PersonRegistry
+
+        self._registry = PersonRegistry()
+        self._reid = ReIDModule(self._registry, lost_ttl_sec=600.0, face_threshold=0.5)
+
+        # 初始化 ASD 模块（滑动窗口缓冲）
+        from src.vision.asd import ASDModule
+
+        self._asd = ASDModule(device=config_module.DEVICE)
+        self._asd_window_frames: Dict[int, list] = {}  # track_id → 嘴部帧列表
+        self._asd_full_audio: Optional[np.ndarray] = None  # 预提取音频
+        self._asd_window_size = 25  # 每次推理使用的帧数（~1s@25fps）
+        self._current_speaker: Optional[int] = None  # 当前说话的 track_id
+
         # 加载模型
         self._load_models()
 
@@ -224,13 +240,11 @@ class VisionPipeline:
             raise
 
         if self.config.ENABLE_SCENE_CLASSIFICATION:
-            self.logger.info(f"加载场景描述模型 (Florence-2)...")
+            self.logger.info(f"加载场景描述模型 (moondream2)...")
             try:
                 from src.vision.scene_classifier import SceneClassifier
 
-                self.scene_classifier = SceneClassifier(
-                    model_dir=self.config.FLORENCE2_MODEL_DIR, device=self.config.DEVICE
-                )
+                self.scene_classifier = SceneClassifier(device=self.config.DEVICE)
                 self.scene_tracker = SceneStateTracker(
                     change_threshold=self.config.SCENE_CHANGE_THRESHOLD,
                     cooldown_sec=self.config.SCENE_CHANGE_COOLDOWN_SEC,
@@ -257,6 +271,9 @@ class VisionPipeline:
                         None 时自动用 datetime.now()
         """
         self.logger.info(f"开始处理视频: {video_path}")
+
+        # 预提取音频供 ASD 使用
+        self._asd_full_audio = self._extract_audio(video_path)
 
         # 打开视频
         cap = cv2.VideoCapture(video_path)
@@ -304,12 +321,22 @@ class VisionPipeline:
                     frame, tracks, frame_width, frame_height, frame_count
                 )
 
+                # ASD：收集嘴部 ROI，每 _asd_window_size 帧推理一次
+                self._collect_asd_frame(frame, tracks_with_faces)
+                if frame_count % self._asd_window_size == 0:
+                    self._run_asd_inference(fps, frame_count)
+
                 # 生成 face_detection 事件（缓存帧不重复生成）
                 for track in tracks_with_faces:
                     fi = track.get("face_info")
                     if fi and not fi.get("from_cache"):
                         track_id = track["track_id"]
                         embedding = fi["embedding"]
+
+                        # Re-ID：解析稳定 alias
+                        emb_vec = np.array(embedding["vector"], dtype=np.float32)
+                        alias = self._reid.resolve(track_id, emb_vec)
+                        fi["alias"] = alias
 
                         # 去重检查：只在新人脸或特征变化显著时输出事件
                         if self._should_emit_face_event(track_id, embedding):
@@ -320,13 +347,21 @@ class VisionPipeline:
                                 frame_width=frame_width,
                                 frame_height=frame_height,
                             )
-                            self.logger.info(f"\n{'='*70}\n>>> VISION DETECTED: Face | track_id={track_id} | confidence={fi['confidence']:.3f} | quality={fi['quality']['overall_quality']:.3f}\n{'='*70}")
+                            self.logger.info(
+                                f"\n{'=' * 70}\n>>> VISION DETECTED: Face | track_id={track_id} | alias={alias} | confidence={fi['confidence']:.3f} | quality={fi['quality']['overall_quality']:.3f}\n{'=' * 70}"
+                            )
                             self.event_sink.write_event(event)
                             # 保存向量数组用于后续比较
-                            self.last_emitted_embeddings[track_id] = np.array(embedding['vector'])
+                            self.last_emitted_embeddings[track_id] = np.array(
+                                embedding["vector"]
+                            )
 
-                # 更新追踪管理器
+                # 更新追踪管理器，通知 Re-ID 消失的 track
+                prev_ids = set(self.track_manager.active_tracks.keys())
                 self.track_manager.update(tracks_with_faces, timestamp)
+                curr_ids = set(self.track_manager.active_tracks.keys())
+                for lost_id in prev_ids - curr_ids:
+                    self._reid.mark_lost(lost_id)
 
                 # 输出已完成的追踪事件
                 if self.config.ENABLE_PERSON_TRACK_EVENT:
@@ -335,7 +370,9 @@ class VisionPipeline:
                         event = self.event_generator.generate_person_track_event(
                             track_info=track_info, timestamp=timestamp
                         )
-                        self.logger.info(f"\n{'='*70}\n>>> VISION DETECTED: PersonTrack | track_id={track_info.track_id} | age={track_info.age} | faces={len(track_info.face_event_ids)}\n{'='*70}")
+                        self.logger.info(
+                            f"\n{'=' * 70}\n>>> VISION DETECTED: PersonTrack | track_id={track_info.track_id} | age={track_info.age} | faces={len(track_info.face_event_ids)}\n{'=' * 70}"
+                        )
                         self.event_sink.write_event(event)
 
                 # 场景检测（两级触发）
@@ -353,8 +390,10 @@ class VisionPipeline:
                             event = self.event_generator.generate_scene_detection_event(
                                 completed
                             )
-                            scene_objs = completed.get('objects', [])
-                            self.logger.info(f"\n{'='*70}\n>>> VISION DETECTED: Scene | label={description} | objects={scene_objs}\n{'='*70}")
+                            scene_objs = completed.get("objects", [])
+                            self.logger.info(
+                                f"\n{'=' * 70}\n>>> VISION DETECTED: Scene | label={description} | objects={scene_objs}\n{'=' * 70}"
+                            )
                             self.event_sink.write_event(event)
                             self.logger.info(f"场景描述: {description}")
 
@@ -409,6 +448,80 @@ class VisionPipeline:
                 f"生成事件: {self.event_sink.event_count}"
             )
 
+    def process_window(self, frames: List[np.ndarray], frame_start: int,
+                       fps: float, audio_slice: np.ndarray,
+                       video_start: Optional[datetime] = None) -> Dict:
+        """
+        处理一个帧窗口，返回该窗口的视觉结果。
+
+        Args:
+            frames: 帧列表
+            frame_start: 窗口起始帧号（用于时间戳计算）
+            fps: 视频帧率
+            audio_slice: 对应时间段的音频（16kHz float32）
+
+        Returns:
+            {
+              'track_alias': {track_id: alias},   # 当前窗口内所有 track 的 alias
+              'speaker_track_id': int | None,      # ASD 判断的说话人 track_id
+              'face_events': [FaceDetectionEvent], # 本窗口产生的 face 事件
+            }
+        """
+        if not frames:
+            return {'track_alias': {}, 'speaker_track_id': None, 'face_events': []}
+
+        base_time = video_start or datetime.now()
+        frame_height, frame_width = frames[0].shape[:2]
+        face_events = []
+        track_alias: Dict[int, str] = {}
+
+        for i, frame in enumerate(frames):
+            frame_count = frame_start + i
+            timestamp = base_time + timedelta(seconds=frame_count / fps)
+            tracks = self._detect_and_track(frame, frame_width, frame_height)
+            tracks_with_faces = self._detect_and_embed_faces(
+                frame, tracks, frame_width, frame_height, frame_count
+            )
+            self._collect_asd_frame(frame, tracks_with_faces)
+
+            for track in tracks_with_faces:
+                fi = track.get("face_info")
+                if not fi:
+                    continue
+                track_id = track["track_id"]
+                if not fi.get("from_cache"):
+                    emb_vec = np.array(fi["embedding"]["vector"], dtype=np.float32)
+                    alias = self._reid.resolve(track_id, emb_vec)
+                    fi["alias"] = alias
+                    track_alias[track_id] = alias
+
+                    if self._should_emit_face_event(track_id, fi["embedding"]):
+                        event = self.event_generator.generate_face_detection_event(
+                            face_info=fi, track_id=track_id, timestamp=timestamp,
+                            frame_width=frame_width, frame_height=frame_height,
+                        )
+                        face_events.append(event)
+                        self.last_emitted_embeddings[track_id] = np.array(fi["embedding"]["vector"])
+                else:
+                    # 缓存帧：alias 已在 fi 中，直接记录
+                    if fi.get("alias"):
+                        track_alias[track_id] = fi["alias"]
+
+            prev_ids = set(self.track_manager.active_tracks.keys())
+            self.track_manager.update(tracks_with_faces, timestamp)
+            for lost_id in prev_ids - set(self.track_manager.active_tracks.keys()):
+                self._reid.mark_lost(lost_id)
+
+        # ASD 推理：直接传入窗口切片，frame_count 传窗口长度（偏移从0计算）
+        self._asd_full_audio = audio_slice
+        self._run_asd_inference(fps, len(frames))
+
+        return {
+            'track_alias': track_alias,
+            'speaker_track_id': self._current_speaker,
+            'face_events': face_events,
+        }
+
     def _should_emit_face_event(self, track_id: int, embedding_dict: Dict) -> bool:
         """
         判断是否应该为该 track_id 输出新的 face_detection 事件
@@ -423,10 +536,111 @@ class VisionPipeline:
         if track_id not in self.last_emitted_embeddings:
             return True
 
-        current_vec = np.array(embedding_dict['vector'])
+        current_vec = np.array(embedding_dict["vector"])
         last_vec = self.last_emitted_embeddings[track_id]
         similarity = float(np.dot(current_vec, last_vec))
         return similarity < self.config.FACE_CHANGE_THRESHOLD
+
+    @staticmethod
+    def _extract_audio(video_path: str) -> np.ndarray:
+        """从视频文件提取 16kHz 单声道 float32 音频"""
+        import subprocess
+
+        cmd = [
+            "ffmpeg",
+            "-i",
+            video_path,
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-",
+            "-loglevel",
+            "error",
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            return np.zeros(0, dtype=np.float32)
+        return np.frombuffer(result.stdout, dtype=np.float32).copy()
+
+    def _collect_asd_frame(self, frame: np.ndarray, tracks: List[Dict]):
+        """收集每个 track 的嘴部 ROI 到 ASD 缓冲区"""
+        from src.vision.asd import extract_mouth_roi
+
+        for track in tracks:
+            fi = track.get("face_info")
+            if fi is None:
+                continue
+            tid = track["track_id"]
+            roi = extract_mouth_roi(frame, fi["bbox"])
+            if tid not in self._asd_window_frames:
+                self._asd_window_frames[tid] = []
+            self._asd_window_frames[tid].append(roi)
+            # 只保留最近 _asd_window_size 帧
+            if len(self._asd_window_frames[tid]) > self._asd_window_size:
+                self._asd_window_frames[tid].pop(0)
+
+    def _run_asd_inference(self, fps: float, frame_count: int = 0):
+        """触发 ASD 推理，更新 _current_speaker"""
+        if not self._asd_window_frames:
+            return
+        face_frames = {
+            tid: np.array(frames)
+            for tid, frames in self._asd_window_frames.items()
+            if len(frames) >= 8
+        }
+        if not face_frames:
+            return
+
+        # 从预提取音频中按帧位置切片
+        sr = 16000
+        window_sec = self._asd_window_size / fps
+        end_sample = int(frame_count / fps * sr)
+        start_sample = max(0, end_sample - int(window_sec * sr))
+        if hasattr(self, "_asd_full_audio") and self._asd_full_audio is not None:
+            audio_slice = self._asd_full_audio[start_sample:end_sample]
+        else:
+            audio_slice = np.zeros(int(window_sec * sr), dtype=np.float32)
+
+        scores = self._asd.predict(face_frames, audio_slice, fps=fps)
+        if scores:
+            best_tid = max(scores, key=scores.get)
+            best_score = scores[best_tid]
+            if best_score >= 0.5:
+                # ASD 置信度足够，直接使用
+                self._current_speaker = best_tid
+                self.logger.debug(
+                    f"ASD scores: {scores} → speaker={self._current_speaker}"
+                )
+            else:
+                # ASD 置信度低（遮挡/侧脸），fallback 到声纹匹配
+                self._current_speaker = self._fallback_voice_match(audio_slice)
+                self.logger.debug(f"ASD fallback → speaker={self._current_speaker}")
+
+    def _fallback_voice_match(self, audio_slice: np.ndarray) -> Optional[int]:
+        """ASD 置信度低时，用声纹匹配找说话人对应的 track_id"""
+        if len(audio_slice) < 1600:  # 少于 0.1s 不处理
+            return None
+        try:
+            from src.audio.audio_embedder import VoiceEmbedder
+
+            if not hasattr(self, "_voice_embedder"):
+                self._voice_embedder = VoiceEmbedder()
+            result = self._voice_embedder.extract(audio_slice)
+            emb_vec = np.array(result["vector"], dtype=np.float32)
+            match = self._registry.match_voice(emb_vec)
+            if not match:
+                return None
+            person_id = match[0]
+            # 找到该 person_id 对应的 track_id
+            for tid, alias in self._reid._track_to_alias.items():
+                if alias == person_id:
+                    return tid
+        except Exception:
+            pass
+        return None
 
     def _detect_and_track(
         self, frame: np.ndarray, frame_width: int, frame_height: int

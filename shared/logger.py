@@ -84,6 +84,26 @@ def get_mq_logger() -> logging.Logger:
     return setup_logger("mq_comm")
 
 
+# ── 事件摘要（截断向量字段）──
+
+_VECTOR_KEYS = {"vector", "face_embedding", "voice_embedding", "embedding"}
+
+
+def _summarize_event(obj, _depth=0):
+    """递归截断向量字段，返回可读摘要结构"""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k in _VECTOR_KEYS and isinstance(v, (list, tuple)) and len(v) > 8:
+                out[k] = f"[...{len(v)}d vector...]"
+            else:
+                out[k] = _summarize_event(v, _depth + 1)
+        return out
+    if isinstance(obj, list) and _depth == 0:
+        return [_summarize_event(i, _depth + 1) for i in obj]
+    return obj
+
+
 # ── 层间事件日志（带凸显标记）──
 
 def log_event_inbound(logger: logging.Logger, from_layer: str,
@@ -97,7 +117,7 @@ def log_event_inbound(logger: logging.Logger, from_layer: str,
         event_type: 事件类型（PerceptionEvent / SemanticEvent / Opportunity / ExecutionPlan）
         event_data: 事件完整数据
     """
-    event_json = json.dumps(event_data, ensure_ascii=False, default=str)
+    event_json = json.dumps(_summarize_event(event_data), ensure_ascii=False, default=str)
     sep = "=" * 70
     logger.info(f"\n{sep}")
     logger.info(f">>> INBOUND [{event_type}] from {from_layer}-layer")
@@ -117,7 +137,7 @@ def log_event_outbound(logger: logging.Logger, to_layer: str,
         event_type: 事件类型
         event_data: 事件完整数据
     """
-    event_json = json.dumps(event_data, ensure_ascii=False, default=str)
+    event_json = json.dumps(_summarize_event(event_data), ensure_ascii=False, default=str)
     sep = "=" * 70
     logger.info(f"\n{sep}")
     logger.info(f"<<< OUTBOUND [{event_type}] to {to_layer}-layer")

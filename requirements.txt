@@ -9,9 +9,9 @@ psycopg[binary]>=3.1.0
 pgvector>=0.2.0
 openai-whisper>=1.0.0
 Pillow>=9.0.0
-transformers>=4.30.0
+transformers==4.41.2
 ultralytics>=8.0.0
-volcenginesdkarkruntime>=1.0.0
+#volcenginesdkarkruntime
 flask>=3.0.0
 flask-cors>=4.0.0
 fastapi>=0.100.0

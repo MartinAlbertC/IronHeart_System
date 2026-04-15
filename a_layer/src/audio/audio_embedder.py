@@ -1,4 +1,5 @@
 """声纹 Embedding 模块 - 基于 WeSpeaker ResNet34 ONNX"""
+
 import numpy as np
 from typing import Dict, List
 
@@ -20,8 +21,9 @@ class VoiceEmbedder:
         sample_rate: int = config.AUDIO_SAMPLE_RATE,
     ):
         import onnxruntime as ort
+
         self._sess = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"]
+            model_path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
         )
         self._input_name = self._sess.get_inputs()[0].name
         self._model_name = model_name
@@ -51,10 +53,10 @@ class VoiceEmbedder:
                 'norm': 'l2'
             }
         """
-        fbank = self._compute_fbank(audio)           # (T, 80)
-        fbank = fbank[np.newaxis, :, :]              # (1, T, 80)
+        fbank = self._compute_fbank(audio)  # (T, 80)
+        fbank = fbank[np.newaxis, :, :]  # (1, T, 80)
         emb = self._sess.run(None, {self._input_name: fbank})[0][0]  # (256,)
-        emb = emb / (np.linalg.norm(emb) + 1e-8)    # L2 归一化
+        emb = emb / (np.linalg.norm(emb) + 1e-8)  # L2 归一化
 
         return {
             "model": self._model_name,
@@ -78,7 +80,7 @@ class VoiceEmbedder:
             (T, 80) float32 Fbank 矩阵
         """
         sr = self._sample_rate
-        frame_len = int(sr * self._frame_length_ms / 1000)   # 400
+        frame_len = int(sr * self._frame_length_ms / 1000)  # 400
         frame_shift = int(sr * self._frame_shift_ms / 1000)  # 160
         n_mels = self._num_mel_bins
 
@@ -92,10 +94,12 @@ class VoiceEmbedder:
             n_frames = 1
             emphasized = np.pad(emphasized, (0, frame_len))
 
-        frames = np.stack([
-            emphasized[i * frame_shift: i * frame_shift + frame_len]
-            for i in range(n_frames)
-        ])  # (T, frame_len)
+        frames = np.stack(
+            [
+                emphasized[i * frame_shift : i * frame_shift + frame_len]
+                for i in range(n_frames)
+            ]
+        )  # (T, frame_len)
 
         # 加汉明窗
         frames *= np.hamming(frame_len)
@@ -105,8 +109,10 @@ class VoiceEmbedder:
         power_spec = np.abs(np.fft.rfft(frames, n=fft_size)) ** 2  # (T, fft_size//2+1)
 
         # Mel 滤波器组
-        mel_filters = self._mel_filterbank(sr, fft_size, n_mels)   # (n_mels, fft_size//2+1)
-        mel_energy = np.dot(power_spec, mel_filters.T)               # (T, n_mels)
+        mel_filters = self._mel_filterbank(
+            sr, fft_size, n_mels
+        )  # (n_mels, fft_size//2+1)
+        mel_energy = np.dot(power_spec, mel_filters.T)  # (T, n_mels)
 
         # 取对数，加 1e-6 防止 log(0)
         log_mel = np.log(mel_energy + 1e-6)
@@ -116,6 +122,7 @@ class VoiceEmbedder:
     @staticmethod
     def _mel_filterbank(sr: int, fft_size: int, n_mels: int) -> np.ndarray:
         """构建 Mel 三角滤波器组，返回 (n_mels, fft_size//2+1)"""
+
         def hz_to_mel(hz):
             return 2595.0 * np.log10(1.0 + hz / 700.0)
 
@@ -132,7 +139,11 @@ class VoiceEmbedder:
         filters = np.zeros((n_mels, n_fft_bins))
 
         for m in range(1, n_mels + 1):
-            f_left, f_center, f_right = bin_points[m - 1], bin_points[m], bin_points[m + 1]
+            f_left, f_center, f_right = (
+                bin_points[m - 1],
+                bin_points[m],
+                bin_points[m + 1],
+            )
             for k in range(f_left, f_center):
                 if f_center != f_left:
                     filters[m - 1, k] = (k - f_left) / (f_center - f_left)

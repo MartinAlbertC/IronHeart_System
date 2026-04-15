@@ -48,9 +48,9 @@ class VoiceActivityDetector:
     def _load_model(self):
         import torch
         model, utils = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad',
+            repo_or_dir='/home/hp/.cache/torch/hub/snakers4_silero-vad_master',
             model='silero_vad',
-            force_reload=False,
+            source='local',
             trust_repo=True,
         )
         model.eval()
