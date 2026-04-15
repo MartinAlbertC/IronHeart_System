@@ -1,9 +1,12 @@
 # 模型文件（太大，不提交）
-models/
+models/*
 *.pt
 *.onnx
 *.safetensors
 *.bin
+
+# 但以下配置文件需要提交（跟踪项目运行配置）
+!models/botsort_custom.yaml
 
 # 运行时生成
 logs/
@@ -14,7 +17,8 @@ outputs/
 # Node.js
 e_layer/node_modules/
 
-docs/
+docs/*
+!docs/AB层部署指南.md
 
 # Python
 __pycache__/

@@ -71,6 +71,10 @@ MODELS = [
         "~1KB",
     ),
 
+    # ── Light-ASD Active Speaker Detection — 请使用 Clone 方式获取 ──
+    #   cd models
+    #   git clone https://github.com/Junhua-Liao/Light-ASD.git
+
     # ── Wespeaker 声纹编码模型 (~26MB) ──
     (
         "wespeaker/wespeaker-cnceleb-resnet34-LM/cnceleb_resnet34_LM.onnx",
@@ -84,22 +88,12 @@ MODELS = [
     ),
 ]
 
-# YOLO 模型（项目根目录）
-ROOT_MODELS = [
-    (
-        "yolo12n.pt",
-        "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo12n.pt",
-        "~5.4MB",
-    ),
+# YOLO 模型（models/ 目录）
+YOLO_MODELS = [
     (
         "yolo26n.pt",
         "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo26n.pt",
         "~5.3MB",
-    ),
-    (
-        "yolo26n-cls.pt",
-        "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo26n-cls.pt",
-        "~5.6MB",
     ),
 ]
 
@@ -125,7 +119,7 @@ def download_file(url: str, dest: Path, size_hint: str):
 
 
 def main():
-    total = len(MODELS) + len(ROOT_MODELS)
+    total = len(MODELS) + len(YOLO_MODELS)
     print(f"IronHeart Model Downloader — {total} files to download\n")
 
     root = Path(__file__).parent
@@ -137,13 +131,13 @@ def main():
         if not download_file(url, dest, size_hint):
             failed.append(str(dest))
 
-    # 根目录下的 YOLO 模型
-    for rel_path, url, size_hint in ROOT_MODELS:
-        dest = root / rel_path
+    # models/ 目录下的 YOLO 模型
+    for rel_path, url, size_hint in YOLO_MODELS:
+        dest = MODELS_DIR / rel_path
         if not download_file(url, dest, size_hint):
             failed.append(str(dest))
 
-    # 复制 botsort_custom.yaml（已在仓库中，无需下载）
+    # 检查 botsort_custom.yaml（已在仓库中，通过 git 追踪）
     yaml_src = root / "models" / "botsort_custom.yaml"
     if not yaml_src.exists():
         print(f"\n  [WARN] {yaml_src} not found (should be in repo)")
@@ -156,7 +150,11 @@ def main():
         sys.exit(1)
     else:
         print("All models downloaded successfully!")
-        print("\nNOTE: FunASR (SenseVoiceSmall) model will be auto-downloaded on first run.")
+        print("\nNOTE:")
+        print("  - FunASR (SenseVoiceSmall) 模型首次调用时自动下载")
+        print("  - Light-ASD 权重请使用 Clone 方式获取：")
+        print("      cd models")
+        print("      git clone https://github.com/Junhua-Liao/Light-ASD.git")
 
 
 if __name__ == "__main__":

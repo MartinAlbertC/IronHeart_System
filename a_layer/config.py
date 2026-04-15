@@ -25,7 +25,7 @@ VIDEO_FPS = 30
 
 # ============= 快线路配置 =============
 
-# YOLOv8 配置 - 使用绝对路径指向已有的模型文件
+# YOLOv26 配置 - 使用绝对路径指向已有的模型文件
 YOLO_MODEL = str(MODELS_DIR / "yolo26n.pt")
 YOLO_CONF_THRESHOLD = 0.5
 YOLO_IOU_THRESHOLD = 0.45
