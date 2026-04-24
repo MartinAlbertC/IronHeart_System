@@ -120,6 +120,28 @@ class MQClient:
             logger.error(f"[RECV←{queue_name}] 异常: {e}")
             return None
 
+    def try_receive(self, queue_name: str) -> Optional[Dict]:
+        """
+        非阻塞接收：有消息则返回，无消息立即返回 None
+
+        Args:
+            queue_name: 队列名
+
+        Returns:
+            消息字典，或 None（队列空或连接异常时）
+        """
+        try:
+            resp = self._send_and_recv({"op": "try_recv", "queue": queue_name})
+            if resp.get("status") == "ok" and "data" in resp:
+                msg = json.loads(resp["data"]) if isinstance(resp["data"], str) else resp["data"]
+                logger.info(f"[TRY_RECV←{queue_name}] 成功")
+                return msg
+            else:
+                return None
+        except Exception as e:
+            logger.error(f"[TRY_RECV←{queue_name}] 异常: {e}")
+            return None
+
     def subscribe(self, queue_name: str, callback: Callable[[Dict], None]):
         """
         订阅队列：在后台线程中持续 receive，有消息时调用 callback

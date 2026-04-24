@@ -59,6 +59,72 @@ def init_db():
         """)
         logger.info("Tier 2: tier2_memories 已创建")
 
+        # --- 新增：反思配置表 ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reflection_config (
+                id            INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                schedule_time TEXT NOT NULL DEFAULT '["00:00"]',
+                today_count   INT NOT NULL DEFAULT 0,
+                last_date     DATE,
+                updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        cur.execute("""
+            INSERT INTO reflection_config (schedule_time) VALUES ('["00:00"]')
+            ON CONFLICT DO NOTHING;
+        """)
+        logger.info("新增: reflection_config 已创建")
+
+        # --- 新增：行动卡片表 ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS action_cards (
+                action_id      VARCHAR(64) PRIMARY KEY,
+                source         VARCHAR(16) NOT NULL DEFAULT 'pipeline',
+                type           VARCHAR(32) NOT NULL,
+                title          TEXT,
+                content        TEXT,
+                confidence     REAL DEFAULT 0.0,
+                status         VARCHAR(16) NOT NULL DEFAULT 'pending',
+                context_json   JSONB,
+                opportunity_id VARCHAR(64),
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        logger.info("新增: action_cards 已创建")
+
+        # --- 新增：反思历史表 ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reflection_history (
+                id              SERIAL PRIMARY KEY,
+                triggered_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                trigger_type    VARCHAR(16) NOT NULL DEFAULT 'manual',
+                tier3_events    INT DEFAULT 0,
+                tier2_written   INT DEFAULT 0,
+                labels_updated  INT DEFAULT 0,
+                names_updated   INT DEFAULT 0,
+                tier1_updated   BOOLEAN DEFAULT FALSE,
+                duration_seconds INT DEFAULT 0
+            );
+        """)
+        logger.info("新增: reflection_history 已创建")
+
+        # --- 新增：视频任务表 ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS video_jobs (
+                job_id       VARCHAR(64) PRIMARY KEY,
+                status       VARCHAR(16) NOT NULL DEFAULT 'queued',
+                file_path    TEXT,
+                file_size_mb REAL,
+                source       VARCHAR(32) DEFAULT 'camera',
+                events_generated INT DEFAULT 0,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                return_code  INT
+            );
+        """)
+        logger.info("新增: video_jobs 已创建")
+
         cur.close()
         conn.close()
     except Exception as e:

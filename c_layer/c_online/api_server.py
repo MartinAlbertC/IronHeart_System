@@ -1,4 +1,4 @@
-"""C 层 HTTP API 服务器 - 供 E 层直接查询"""
+"""C 层 HTTP API 服务器 - API Gateway"""
 import json
 import sys
 import os
@@ -20,32 +20,13 @@ except ImportError:
     logger.error("需要安装 fastapi 和 uvicorn: pip install fastapi uvicorn")
     raise
 
-app = FastAPI(title="IranHeart C Layer API", version="1.0")
+app = FastAPI(title="IranHeart C Layer API", version="2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 def _pg_conn():
     import psycopg
     return psycopg.connect(**PG_CONFIG, autocommit=True)
-
-
-@app.get("/api/tier1/{user_id}")
-async def get_tier1(user_id: str):
-    """获取用户画像"""
-    try:
-        conn = _pg_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT critical_facts, updated_at FROM tier1_persona WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row:
-            return {"user_id": user_id, "critical_facts": row[0], "updated_at": str(row[1])}
-        raise HTTPException(404, f"User {user_id} not found")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
 
 @app.get("/api/tier2/{entity_id}")
@@ -127,7 +108,31 @@ async def health():
     return {"status": "ok", "service": "c_layer_api"}
 
 
+# ── Gateway 路由挂载 ──
+from c_layer.c_online.gateway.video import router as video_router
+from c_layer.c_online.gateway.status import router as status_router
+from c_layer.c_online.gateway.reflection import router as reflection_router
+from c_layer.c_online.gateway.actions import router as actions_router
+from c_layer.c_online.gateway.commands import router as commands_router
+from c_layer.c_online.gateway.tier1 import router as tier1_router
+
+app.include_router(video_router,      tags=["视频"])
+app.include_router(status_router,     tags=["状态"])
+app.include_router(reflection_router, tags=["反思"])
+app.include_router(actions_router,    tags=["行动"])
+app.include_router(commands_router,   tags=["指令"])
+app.include_router(tier1_router,      tags=["画像"])
+
+
 def run_api():
+    # 启动 E 层结果订阅
+    from c_layer.c_online.gateway.actions import start_e_results_subscriber
+    start_e_results_subscriber()
+
+    # 启动反思调度器
+    from c_layer.c_online.gateway.reflection import scheduler
+    scheduler.start()
+
     logger.info(f"C层 API 启动: {API_HOST}:{API_PORT}")
     uvicorn.run(app, host=API_HOST, port=API_PORT, log_level="info")
 

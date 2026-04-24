@@ -39,3 +39,4 @@ Thumbs.db
 data/*.mp4
 data/*.wav
 data/*.mp3
+data/uploads/

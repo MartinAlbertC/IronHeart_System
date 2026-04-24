@@ -63,6 +63,8 @@ class Opportunity(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     trigger: TriggerInfo
     context: OpportunityContext = Field(default_factory=OpportunityContext)
+    skip_decision: bool = Field(default=False, description="用户直接指令，跳过决策引擎")
+    source: str = Field(default="pipeline", description="来源: pipeline/command")
 
     # 内部使用的 embedding (使用 PrivateAttr)
     _embedding: Optional[np.ndarray] = PrivateAttr(default=None)
@@ -81,6 +83,7 @@ class Opportunity(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+        extra = "allow"
 
 
 # ============================================================

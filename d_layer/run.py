@@ -73,7 +73,7 @@ class DLayerRunner:
             d_layer_decision="execute_now"
         )
 
-    def process_opportunity(self, opportunity: Opportunity):
+    def process_opportunity(self, opportunity: Opportunity, raw_msg: dict = None):
         """处理一个 Opportunity"""
         opp_id = opportunity.opportunity_id
         summary = opportunity.trigger.summary
@@ -110,6 +110,20 @@ class DLayerRunner:
                     logger.info(f"PendingPool 提升: [{result.payload.opportunity_id}]")
 
         # 3. 对当前 Opportunity 做决策
+        # 识别 skip_decision 标记（用户直接指令，跳过决策引擎）
+        # 优先检查原始消息 dict（Pydantic 模型可能丢弃额外字段）
+        check_dict = raw_msg if raw_msg else (opportunity.model_dump(mode="json") if hasattr(opportunity, 'model_dump') else {})
+        logger.debug(f"raw_msg skip_decision={check_dict.get('skip_decision')}")
+        if check_dict.get("skip_decision"):
+            logger.info(f"用户直接指令，跳过决策: [{opp_id}] {summary}")
+            payload = self._build_execution_payload(opportunity)
+            payload_dict = payload.model_dump(mode="json") if hasattr(payload, 'model_dump') else payload
+            payload_dict["source"] = check_dict.get("source", "command")
+            self.mq.publish("command_execution_plans", payload_dict)
+            logger.info(f"[MQ→execution_plans] 已发送直接指令 plan={payload_dict.get('plan_id')}")
+            self.wm.reset_changed_flags()
+            return
+
         result = self.decision_engine.make_decision(opportunity, self.wm)
 
         # Log decision details
@@ -150,22 +164,31 @@ class DLayerRunner:
             logger.error(f"[MQ→execution_plans] 发送失败 plan={payload.plan_id}")
 
     def run(self):
-        """主循环：从 opportunities 队列接收消息"""
+        """主循环：优先处理用户指令，再处理常规 opportunities"""
         logger.info("=" * 50)
-        logger.info("D层（决策层）启动 - 订阅 opportunities 队列")
+        logger.info("D层（决策层）启动 - 优先处理 command_opportunities，再处理 opportunities")
         logger.info("=" * 50)
 
         while True:
             try:
-                msg = self.mq.receive("opportunities")
-                if msg is None:
-                    logger.warning("收到空消息，1秒后重试")
-                    time.sleep(1)
+                # 1. 优先检查用户指令队列（非阻塞）
+                cmd_msg = self.mq.try_receive("command_opportunities")
+                if cmd_msg is not None:
+                    raw_msg = cmd_msg
+                    opportunity = Opportunity.model_validate(cmd_msg)
+                    self.process_opportunity(opportunity, raw_msg)
+                    continue  # 处理完指令后立即再检查指令队列
+
+                # 2. 再检查常规队列（非阻塞）
+                msg = self.mq.try_receive("opportunities")
+                if msg is not None:
+                    raw_msg = msg
+                    opportunity = Opportunity.model_validate(msg)
+                    self.process_opportunity(opportunity, raw_msg)
                     continue
 
-                # 反序列化为 Opportunity
-                opportunity = Opportunity.model_validate(msg)
-                self.process_opportunity(opportunity)
+                # 3. 两个队列都为空，短暂等待
+                time.sleep(0.3)
 
             except Exception as e:
                 logger.error(f"处理异常: {e}", exc_info=True)

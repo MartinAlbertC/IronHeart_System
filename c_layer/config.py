@@ -11,6 +11,7 @@ PG_CONFIG = {
     "user": os.getenv("PG_USER", "ai_system"),
     "password": os.getenv("PG_PASSWORD", "secretpassword"),
     "dbname": os.getenv("PG_DBNAME", "memory_db"),
+    "options": "-c timezone=Asia/Shanghai",
 }
 
 # Tier3 SQLite 路径

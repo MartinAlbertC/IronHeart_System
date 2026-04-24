@@ -8,23 +8,27 @@
 import argparse
 import hashlib
 import json
+import logging
 import os
 import sqlite3
-import urllib.error
-import urllib.request
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 import psycopg
 
+logger = logging.getLogger("c_layer.night_reflection")
+
 try:
     from .identity_store import IdentityStore
+    from .llm_client import CLayerLLMClient
 except ImportError:
     try:
         from models.identity_store import IdentityStore
+        from llm_client import CLayerLLMClient
     except Exception:
         from identity_store import IdentityStore
+        from llm_client import CLayerLLMClient
 
 
 class NightReflector:
@@ -33,13 +37,14 @@ class NightReflector:
         pg_config: Dict[str, str],
         tier3_db_path: str,
         user_id: str,
-        model_name: str = "glm-4-flash",
+        model_name: str = "deepseek-chat",
     ):
         self.pg_config = pg_config
         self.tier3_db_path = tier3_db_path
         self.user_id = user_id
         self.model_name = model_name
         self.identity_store = IdentityStore(pg_config)
+        self.llm_client = CLayerLLMClient(model_name=model_name)
 
     def _pg_conn(self):
         return psycopg.connect(**self.pg_config, autocommit=False)
@@ -121,13 +126,40 @@ class NightReflector:
         conn.close()
         return unified
 
+    def _call_llm_for_tier2_extraction(
+        self,
+        entity_id: str,
+        events: List[Dict[str, Any]],
+        existing_tier2_memories: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        调用 LLM 从 Tier3 事件列表中提取 Tier2 长期记忆
+
+        Args:
+            entity_id: 实体 ID
+            events: 该实体的 Tier3 事件列表
+            existing_tier2_memories: 现有的 Tier2 记忆列表（用于合并）
+
+        Returns:
+            {
+                "memories": [...],
+                "updated_memories": [...],
+                "reason": "提取理由",
+                "fallback": True/False
+            }
+        """
+        # 使用统一的 LLM 客户端，传入现有 Tier2 记忆
+        return self.llm_client.extract_tier2_memories(entity_id, events, existing_tier2_memories)
+
     def _topic_key(self, event: Dict[str, Any]) -> str:
+        """生成事件的主题键（用于降级模式下的规则合并）"""
         st = (event.get("semantic_type") or "unknown").strip().lower()
         sm = (event.get("summary") or "").strip().lower()
         digest = hashlib.md5(sm.encode("utf-8")).hexdigest()[:8]
         return f"{st}:{digest}"
 
     def _importance(self, event: Dict[str, Any], duplicate_count: int) -> float:
+        """计算事件的重要性分数（用于降级模式）"""
         event_type = (event.get("semantic_type") or "unknown").lower()
         base = 0.3
         if any(k in event_type for k in ["error", "conflict", "alarm", "risk"]):
@@ -139,50 +171,132 @@ class NightReflector:
         return max(0.0, min(1.0, base))
 
     def refine_to_tier2(self, events: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, int]:
-        """提纯/去冲突后写入 tier2_memories。"""
-        grouped = defaultdict(list)
+        """
+        提纯 Tier3 事件并写入 tier2_memories。
+        使用 LLM 提取长期记忆特征，降级时使用规则合并。
+
+        数据流：Tier3（当天事件）+ Tier2（现有记忆）→ 更新 Tier2
+        """
+        # 按实体分组
+        by_entity = defaultdict(list)
         for e in events:
             entity = e.get("resolved_entity_id") or "unknown"
-            grouped[(entity, self._topic_key(e))].append(e)
+            by_entity[entity].append(e)
+
+        # 查询现有 Tier2 记忆（用于合并）
+        existing_tier2_by_entity = defaultdict(list)
+        try:
+            conn = self._pg_conn()
+            cur = conn.cursor()
+            for entity_id in by_entity.keys():
+                cur.execute("""
+                    SELECT memory_id, memory_text, base_importance
+                    FROM tier2_memories
+                    WHERE resolved_entity_id = %s
+                    ORDER BY base_importance DESC, created_at DESC
+                    LIMIT 20
+                """, (entity_id,))
+                for row in cur.fetchall():
+                    existing_tier2_by_entity[entity_id].append({
+                        "memory_id": row[0],
+                        "memory_text": row[1],
+                        "base_importance": row[2],
+                    })
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"查询现有 Tier2 记忆失败：{e}")
 
         prepared = []
-        for (entity, topic), rows in grouped.items():
-            rows = sorted(rows, key=lambda x: (x.get("start_ts") or ""))
-            latest = rows[-1]
-            merged_summary = " | ".join(
-                list(dict.fromkeys([r.get("summary") or "" for r in rows if r.get("summary")]))
-            )[:1200]
-            importance = self._importance(latest, len(rows))
-            base_ts = latest.get("start_ts") or datetime.now().isoformat()
-            digest = hashlib.md5(f"{entity}|{topic}|{base_ts}".encode("utf-8")).hexdigest()[:12]
-            memory_id = f"nm_{entity}_{digest}"
+        updated = []  # 需要更新的现有记忆
+        llm_extraction_count = 0
 
-            memory_text = (
-                f"[type={latest.get('semantic_type','unknown')}] {merged_summary}\n"
-                f"[from_tier3] event_count={len(rows)} topic={topic}"
+        for entity_id, entity_events in by_entity.items():
+            # 1. 尝试使用 LLM 提取特征（传入现有 Tier2 记忆）
+            llm_result = self._call_llm_for_tier2_extraction(
+                entity_id,
+                entity_events,
+                existing_tier2_by_entity.get(entity_id, []),
             )
 
-            prepared.append(
-                {
-                    "memory_id": memory_id,
-                    "resolved_entity_id": entity,
-                    "memory_text": memory_text,
-                    "base_importance": importance,
-                    "created_at": base_ts,
-                }
-            )
+            if llm_result.get("memories"):
+                # LLM 提取成功 - 新增记忆
+                for mem in llm_result["memories"]:
+                    base_ts = entity_events[-1].get("start_ts") or datetime.now().isoformat()
+                    digest = hashlib.md5(f"{entity_id}|{mem.get('memory_text', '')[:50]}|{base_ts}".encode("utf-8")).hexdigest()[:12]
+                    memory_id = f"nm_{entity_id}_{digest}"
+
+                    memory_text = (
+                        f"[type={mem.get('category', 'extracted')}] {mem['memory_text']}\n"
+                        f"[from_tier3_llm] event_count={len(entity_events)} reason={mem.get('reason', llm_result.get('reason', ''))}"
+                    )
+
+                    prepared.append({
+                        "memory_id": memory_id,
+                        "resolved_entity_id": entity_id,
+                        "memory_text": memory_text,
+                        "base_importance": float(mem.get("base_importance", 0.5)),
+                        "created_at": base_ts,
+                    })
+
+                llm_extraction_count += 1
+
+            if llm_result.get("updated_memories"):
+                # LLM 返回需要更新的现有记忆
+                for mem in llm_result["updated_memories"]:
+                    updated.append({
+                        "memory_id": mem.get("memory_id"),
+                        "memory_text": mem.get("memory_text"),
+                        "base_importance": float(mem.get("base_importance", 0.5)),
+                    })
+
+            if not llm_result.get("memories") and not llm_result.get("updated_memories"):
+                # LLM 降级：使用规则合并
+                # 按 topic_key 分组
+                grouped = defaultdict(list)
+                for e in entity_events:
+                    topic_key = self._topic_key(e)
+                    grouped[(entity_id, topic_key)].append(e)
+
+                for (entity, topic), rows in grouped.items():
+                    rows = sorted(rows, key=lambda x: (x.get("start_ts") or ""))
+                    latest = rows[-1]
+                    merged_summary = " | ".join(
+                        list(dict.fromkeys([r.get("summary") or "" for r in rows if r.get("summary")]))
+                    )[:1200]
+                    importance = self._importance(latest, len(rows))
+                    base_ts = latest.get("start_ts") or datetime.now().isoformat()
+                    digest = hashlib.md5(f"{entity}|{topic}|{base_ts}".encode("utf-8")).hexdigest()[:12]
+                    memory_id = f"nm_{entity}_{digest}"
+
+                    memory_text = (
+                        f"[type={latest.get('semantic_type','unknown')}] {merged_summary}\n"
+                        f"[from_tier3] event_count={len(rows)} topic={topic}"
+                    )
+
+                    prepared.append({
+                        "memory_id": memory_id,
+                        "resolved_entity_id": entity,
+                        "memory_text": memory_text,
+                        "base_importance": importance,
+                        "created_at": base_ts,
+                    })
 
         if dry_run:
             return {
                 "input_events": len(events),
                 "after_merge": len(prepared),
+                "updated": len(updated),
+                "llm_extraction": llm_extraction_count,
                 "written": 0,
             }
 
+        # 写入数据库（新增 + 更新）
         conn = self._pg_conn()
         cur = conn.cursor()
         written = 0
         try:
+            # 写入新增记忆
             for m in prepared:
                 cur.execute(
                     """
@@ -204,6 +318,21 @@ class NightReflector:
                     ),
                 )
                 written += 1
+
+            # 更新现有记忆
+            for m in updated:
+                cur.execute(
+                    """
+                    UPDATE tier2_memories
+                    SET memory_text = %s,
+                        base_importance = %s,
+                        last_accessed_at = CURRENT_TIMESTAMP
+                    WHERE memory_id = %s
+                    """,
+                    (m["memory_text"], m["base_importance"], m["memory_id"]),
+                )
+                written += 1
+
             conn.commit()
         except Exception:
             conn.rollback()
@@ -215,6 +344,8 @@ class NightReflector:
         return {
             "input_events": len(events),
             "after_merge": len(prepared),
+            "updated": len(updated),
+            "llm_extraction": llm_extraction_count,
             "written": written,
         }
 
@@ -224,99 +355,8 @@ class NightReflector:
         current_labels: Optional[str],
         snippets: List[str],
     ) -> Dict[str, Any]:
-        """调用 BigModel(OpenAI 风格) 生成 identity 更新建议。"""
-        api_key = os.getenv("BIGMODEL_API_KEY", "").strip() or os.getenv("ZHIPU_API_KEY", "").strip()
-        base_url = os.getenv("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
-        model = os.getenv("BIGMODEL_MODEL", self.model_name or "glm-4-flash")
-
-        if not api_key:
-            return {
-                "entity_id": entity_id,
-                "proposed_name": None,
-                "proposed_labels": current_labels or "",
-                "confidence": 0.0,
-                "reason": "BIGMODEL_API_KEY/ZHIPU_API_KEY 未设置，跳过自动 identity 更新",
-            }
-
-        try:
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是 identity 更新建议器。只输出一个 JSON 对象，"
-                            "字段必须包含 entity_id, proposed_name, proposed_labels, confidence, reason。"
-                            "confidence 取 0 到 1 之间的小数。不要输出 JSON 以外内容。"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "entity_id": entity_id,
-                                "current_labels": current_labels or "",
-                                "evidence": snippets[:20],
-                                "task": "基于证据返回 JSON 建议",
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                "temperature": 0,
-                "stream": False,
-            }
-
-            req = urllib.request.Request(
-                url=f"{base_url}/chat/completions",
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                },
-                method="POST",
-            )
-
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                raw = resp.read().decode("utf-8")
-
-            body = json.loads(raw)
-            text = (
-                body.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1:
-                raise ValueError(f"LLM 未返回 JSON，原始内容: {text[:300]}")
-
-            data = json.loads(text[start : end + 1])
-            data.setdefault("entity_id", entity_id)
-            data.setdefault("proposed_name", None)
-            data.setdefault("proposed_labels", current_labels or "")
-            data.setdefault("confidence", 0.0)
-            data.setdefault("reason", "")
-            return data
-
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
-            return {
-                "entity_id": entity_id,
-                "proposed_name": None,
-                "proposed_labels": current_labels or "",
-                "confidence": 0.0,
-                "reason": f"LLM HTTP 错误: {e.code} {detail[:300]}",
-            }
-        except Exception as e:
-            return {
-                "entity_id": entity_id,
-                "proposed_name": None,
-                "proposed_labels": current_labels or "",
-                "confidence": 0.0,
-                "reason": f"LLM 调用失败: {e}",
-            }
+        """调用 LLM 生成 identity 更新建议，通过统一 LLM 客户端。"""
+        return self.llm_client.infer_identity(entity_id, current_labels, snippets)
 
     def update_identity_with_llm(self, events: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, int]:
         by_entity = defaultdict(list)
@@ -378,6 +418,7 @@ class NightReflector:
         }
 
     def update_tier1_persona(self, stats: Dict[str, Any], dry_run: bool = False) -> bool:
+        """更新 Tier1 用户画像（仅存储统计信息，不使用 LLM）"""
         if dry_run:
             return True
 
@@ -423,7 +464,149 @@ class NightReflector:
             cur.close()
             conn.close()
 
-    def run(self, dry_run: bool = False, enable_tier1_update: bool = False) -> Dict[str, Any]:
+    def update_tier1_persona_with_llm(
+        self,
+        events: List[Dict[str, Any]],
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        使用 LLM 从 Tier2 长期记忆中提取 Tier1 核心画像
+
+        数据流：Tier2（长期记忆）→ Tier1（核心画像）
+        Tier2 已经过筛选和合并，是更稳定的数据源
+
+        Args:
+            events: Tier3 事件列表（用于上下文参考）
+            dry_run: 是否只模拟执行
+
+        Returns:
+            {
+                "critical_facts": {...},
+                "updated": True/False,
+                "reason": "..."
+            }
+        """
+        # 1. 查询现有 Tier2 记忆（主要数据源）
+        tier2_memories = []
+        try:
+            conn = self._pg_conn()
+            cur = conn.cursor()
+            # 获取所有与该用户相关的 Tier2 记忆
+            cur.execute("""
+                SELECT memory_id, resolved_entity_id, memory_text, base_importance, created_at
+                FROM tier2_memories
+                ORDER BY base_importance DESC, created_at DESC
+                LIMIT 50
+            """)
+            for row in cur.fetchall():
+                tier2_memories.append({
+                    "memory_id": row[0],
+                    "resolved_entity_id": row[1],
+                    "memory_text": row[2],
+                    "base_importance": row[3],
+                    "created_at": str(row[4]) if row[4] else "",
+                })
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"读取 Tier2 记忆失败：{e}")
+
+        if not tier2_memories:
+            return {
+                "critical_facts": {},
+                "updated": False,
+                "reason": "没有找到 Tier2 记忆",
+            }
+
+        # 2. 获取当前 critical_facts
+        current_facts = {}
+        try:
+            conn = self._pg_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT critical_facts FROM tier1_persona WHERE user_id = %s",
+                (self.user_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                current_facts = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"读取 Tier1 失败：{e}")
+
+        if dry_run:
+            return {
+                "critical_facts": current_facts,
+                "updated": False,
+                "reason": "dry_run 模式",
+            }
+
+        # 3. 调用 LLM 从 Tier2 提取 Tier1（Tier3 事件作为上下文参考）
+        llm_result = self.llm_client.update_tier1_persona(tier2_memories, current_facts, events)
+
+        # 4. 更新 Tier1
+        new_facts = llm_result.get("critical_facts", current_facts)
+        if new_facts != current_facts:
+            try:
+                conn = self._pg_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO tier1_persona (user_id, system_prompt_base, critical_facts)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET critical_facts = EXCLUDED.critical_facts,
+                                  updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (self.user_id, "", json.dumps(new_facts, ensure_ascii=False)),
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+
+                logger.info(f"Tier1 已更新：{len(new_facts)} 个特征")
+                return {
+                    "critical_facts": new_facts,
+                    "updated": True,
+                    "reason": llm_result.get("reason", ""),
+                }
+            except Exception as e:
+                logger.error(f"更新 Tier1 失败：{e}")
+                return {
+                    "critical_facts": current_facts,
+                    "updated": False,
+                    "reason": f"数据库更新失败：{e}",
+                }
+
+        return {
+            "critical_facts": current_facts,
+            "updated": False,
+            "reason": llm_result.get("reason", "LLM 未提取到新特征"),
+        }
+
+    def run(
+        self,
+        dry_run: bool = False,
+        enable_tier1_update: bool = False,
+        enable_tier1_llm: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        执行夜间反思
+
+        Args:
+            dry_run: 是否只模拟执行
+            enable_tier1_update: 是否更新 Tier1（仅统计信息）
+            enable_tier1_llm: 是否使用 LLM 提取 Tier1 特征
+
+        Returns:
+            {
+                "tier2": {...},
+                "identity": {...},
+                "tier1": {...},  # 仅当 enable_tier1_llm 时
+                "summary": {...}
+            }
+        """
         events = self.load_tier3_events()
         tier2_stats = self.refine_to_tier2(events, dry_run=dry_run)
         identity_stats = self.update_identity_with_llm(events, dry_run=dry_run)
@@ -431,17 +614,27 @@ class NightReflector:
         merged = {
             "tier3_events": len(events),
             "tier2_written": tier2_stats.get("written", 0),
+            "llm_extraction": tier2_stats.get("llm_extraction", 0),
             "labels_updated": identity_stats.get("labels_updated", 0),
             "names_updated": identity_stats.get("names_updated", 0),
             "dry_run": dry_run,
         }
 
-        if enable_tier1_update:
+        # Tier1 更新（LLM 提取）
+        tier1_result = None
+        if enable_tier1_llm:
+            tier1_result = self.update_tier1_persona_with_llm(events, dry_run=dry_run)
+            merged["tier1_updated"] = tier1_result.get("updated", False)
+            logger.info(f"Tier1 LLM 更新：{tier1_result.get('updated', False)}")
+
+        # Tier1 更新（仅统计信息）
+        if enable_tier1_update and not enable_tier1_llm:
             self.update_tier1_persona(merged, dry_run=dry_run)
 
         return {
             "tier2": tier2_stats,
             "identity": identity_stats,
+            "tier1": tier1_result,
             "summary": merged,
         }
 
@@ -459,9 +652,11 @@ def main():
     parser.add_argument("--pg-dbname")
     parser.add_argument("--tier3-db-path")
     parser.add_argument("--user-id", default=None)
-    parser.add_argument("--model", default=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"))
+    parser.add_argument("--model", default="deepseek-chat")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--enable-tier1-update", action="store_true")
+    parser.add_argument("--enable-tier1-llm", action="store_true",
+                        help="使用 LLM 从 Tier2 提取 Tier1 核心画像")
     args = parser.parse_args()
 
     pg_config = {
@@ -491,6 +686,7 @@ def main():
     result = reflector.run(
         dry_run=args.dry_run,
         enable_tier1_update=args.enable_tier1_update,
+        enable_tier1_llm=args.enable_tier1_llm,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

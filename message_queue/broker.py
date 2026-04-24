@@ -11,7 +11,9 @@ IranHeart 轻量异步 TCP 消息队列 Broker
 协议：Newline-delimited JSON over TCP
   send: {"op":"send", "queue":"queue_name", "data":"json_string"}\n
   recv: {"op":"recv", "queue":"queue_name"}\n  (blocks until available)
+  try_recv: {"op":"try_recv", "queue":"queue_name"}\n  (non-blocking, returns empty if no msg)
   响应: {"status":"ok"}\n 或 {"status":"ok","data":"json_string"}\n
+         {"status":"empty"}\n (try_recv only)
 """
 
 import asyncio
@@ -47,7 +49,7 @@ class MessageBroker:
     """异步 FIFO 消息代理，支持竞争消费者"""
 
     # ── 预定义队列 ──
-    KNOWN_QUEUES = {"a_events", "b_events", "opportunities", "execution_plans"}
+    KNOWN_QUEUES = {"a_events", "b_events", "opportunities", "execution_plans", "e_results", "direct_commands", "command_opportunities", "command_execution_plans"}
 
     def __init__(self):
         self.queues: Dict[str, List[str]] = defaultdict(list)
@@ -88,6 +90,15 @@ class MessageBroker:
             async with self.queue_lock:
                 if (reader, future) in self.waiters[queue]:
                     self.waiters[queue].remove((reader, future))
+
+    async def try_recv_message(self, queue: str) -> str | None:
+        """非阻塞接收：有消息则返回，无消息返回 None"""
+        async with self.queue_lock:
+            if queue in self.queues and self.queues[queue]:
+                data = self.queues[queue].pop(0)
+                logger.info(f"[{queue}] try_recv 出队 | 剩余={len(self.queues[queue])}")
+                return data
+        return None
 
     async def cleanup_connection(self, reader: asyncio.StreamReader):
         if reader in self.active_connections:
@@ -143,6 +154,17 @@ class ClientHandler:
                 await self._respond({"status": "ok", "data": data})
             except asyncio.CancelledError:
                 pass
+
+        elif op == "try_recv":
+            queue = request.get("queue")
+            if not queue:
+                await self._respond({"status": "error", "message": "Missing queue"})
+                return
+            data = await self.broker.try_recv_message(queue)
+            if data is not None:
+                await self._respond({"status": "ok", "data": data})
+            else:
+                await self._respond({"status": "empty"})
 
         elif op == "status":
             await self._respond({"status": "ok", "data": json.dumps(self.broker.get_status())})

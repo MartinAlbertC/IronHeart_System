@@ -3,8 +3,9 @@
 手动触发反思：Tier3 → Tier2 长期记忆 + Tier1 用户画像更新
 
 用法:
-  python c_layer/reflect.py              # 执行反思
-  python c_layer/reflect.py --dry-run    # 仅预览，不写入数据库
+  python c_layer/reflect.py                      # 执行反思（Tier1 仅写统计信息）
+  python c_layer/reflect.py --dry-run            # 仅预览，不写入数据库
+  python c_layer/reflect.py --enable-tier1-llm   # 使用 LLM 从 Tier2 提取 Tier1 核心画像
 """
 import sys
 import json
@@ -18,6 +19,7 @@ from c_layer.night_reflection import NightReflector
 
 def main():
     dry_run = "--dry-run" in sys.argv
+    enable_tier1_llm = "--enable-tier1-llm" in sys.argv
 
     reflector = NightReflector(
         pg_config=PG_CONFIG,
@@ -29,15 +31,23 @@ def main():
         print("[DRY RUN] 仅预览，不写入数据库")
 
     print("反思开始...")
-    result = reflector.run(dry_run=dry_run, enable_tier1_update=True)
+    result = reflector.run(
+        dry_run=dry_run,
+        enable_tier1_update=True,
+        enable_tier1_llm=enable_tier1_llm,
+    )
 
     print()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     s = result["summary"]
     print()
+    tier1_info = ""
+    if result.get("tier1"):
+        tier1_info = f" | Tier1画像更新={result['tier1'].get('updated', False)}"
     print(f"完成: Tier3事件={s['tier3_events']} → Tier2写入={s['tier2_written']} | "
-          f"身份标签更新={s['labels_updated']} | 身份重命名={s['names_updated']}")
+          f"身份标签更新={s['labels_updated']} | 身份重命名={s['names_updated']}"
+          f"{tier1_info}")
 
 
 if __name__ == "__main__":

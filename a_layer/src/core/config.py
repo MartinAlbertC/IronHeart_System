@@ -34,11 +34,11 @@ ENABLE_PERSON_TRACK_EVENT = False  # 是否输出 person_track 事件
 
 # 人脸检测配置
 FACE_DETECTOR_BACKEND = "mediapipe"  # mediapipe 或 retinaface
-FACE_CONF_THRESHOLD = 0.6
-MIN_FACE_QUALITY = 0.5
+FACE_CONF_THRESHOLD = 0.75
+MIN_FACE_QUALITY = 0.8
 # 跳帧 embedding：同一 track_id 每隔 N 帧才重新调用 insightface
 # 期间直接复用上一次的人脸信息
-FACE_REEMBED_INTERVAL = 15
+FACE_REEMBED_INTERVAL = 30
 
 # 人脸编码配置
 FACE_EMBEDDER_MODEL = "arcface_r50"  # arcface_r50 或 arcface_mobilenet
